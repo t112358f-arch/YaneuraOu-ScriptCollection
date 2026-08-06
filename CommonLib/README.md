@@ -88,6 +88,11 @@ for sfen, moves in read_yaneuraou_book_blocks("book.ybb"):
 | `convert_psv_to_hcpe_file(input_path, output, ...)` | PSV から HCPE。 |
 | `convert_hcpe3_to_hcpe_file(input_path, output, ...)` | HCPE3 から HCPE。 |
 | `convert_hcpe3_to_psv_file(input_path, output, ...)` | HCPE3 から PSV。 |
+| `convert_hcpe_to_repe_file(input_path, output, ...)` | HCPE から REPE。 |
+| `convert_repe_to_hcpe_file(input_path, output, ...)` | REPE から HCPE。指し手は0埋め。 |
+| `convert_psv_to_repe_file(input_path, output, ...)` | PSV から REPE。 |
+| `convert_repe_to_psv_file(input_path, output, ...)` | REPE から PSV。指し手・手数は0埋め。 |
+| `convert_hcpe3_to_repe_file(input_path, output, ...)` | HCPE3 から REPE。 |
 
 呼び出し例:
 
@@ -99,6 +104,37 @@ with open("output.psv", "wb") as out:
     stats = convert_hcpe_to_psv_file(Path("input.hcpe"), out)
 print(stats.positions)
 ```
+
+## RepeFormatLib.py
+
+REPE (Rank Encoding Position Eval, 拡張子 `.repe`) 形式のエンコード・デコード専用ライブラリです。
+REPEは `Teacher_Data_Format_V1_Specification` を元にした、局面1つを256bit(32Byte)の固定長で保存する独自フォーマットで、局面・勝敗・評価値のみを持ちます(指し手や手数などは持ちません)。
+
+pack / hcpe / hcpe3 / psv は `cshogi` 側にすでに構造体やdtypeの定義がありますが、REPEはcshogiに存在しない完全な独自フォーマットのため、局面を組合せ順位(rank)へ変換する処理を他の形式と混在させず、このファイルへ独立させています。
+
+主な内容:
+
+| 名前 | 用途 |
+| --- | --- |
+| `REPE_SIZE` | 1レコードのbyte size (32)。 |
+| `encode_position(board, game_result_stm, eval_stm)` | `cshogi.Board` と手番側から見た勝敗・評価値をREPEの32byteへ変換します。 |
+| `decode_position(data)` | REPEの32byteを `(board, game_result_stm, eval_stm)` へ復元します。 |
+
+`decode_position` が返す `board` は、常に手番側をBLACKとみなす正規化済みの局面 (`board.turn == cshogi.BLACK`) です。REPEは仕様上、手番側視点へ正規化した局面のみを保存し、元の局面の実際の先後(どちらが本来の先手/後手だったか)は保存しないため復元できません。これはREPE自体の仕様であり、情報の欠落ではありません。
+
+呼び出し例:
+
+```python
+from pathlib import Path
+import cshogi
+from RepeFormatLib import encode_position, decode_position
+
+board = cshogi.Board()
+data = encode_position(board, game_result_stm=1, eval_stm=100)
+decoded_board, game_result_stm, eval_stm = decode_position(data)
+```
+
+ビット配置の詳細(79マスの走査順序、side bit列の順序、駒種類列の並び順、成り情報のブロック順など)は `RepeFormatLib.py` 冒頭のdocstringにまとめてあります。
 
 ## YaneShogiLib.py
 

@@ -27,6 +27,10 @@ from TeacherFormatLib import (
 )
 from YaneShogiLib import GameDataDecoder  # noqa: E402
 
+# REPEはcshogiに構造体/dtypeを持たない独自フォーマットのため、局面のrank化・
+# rank復元といったREPE固有の処理はすべて RepeFormatLib.py 側にまとめてある。
+from RepeFormatLib import REPE_SIZE, decode_position, encode_position  # noqa: E402
+
 
 def convert_pack_to_hcpe_file(
     input_path: Path,
@@ -327,6 +331,287 @@ def convert_hcpe3_to_psv_file(
                         int(header["result"]), board.turn
                     )
                     psv.tofile(output)
+                    stats.positions += 1
+
+                    if candidate_num:
+                        visits_bytes = read_exact(
+                            f,
+                            MOVE_VISITS.itemsize * candidate_num,
+                            f"{input_path}: MoveVisits at game {stats.games}, ply {ply}",
+                        )
+                        update_progress(len(visits_bytes))
+
+                    if ply + 1 < move_num:
+                        try:
+                            board.push_move16(selected_move16)
+                        except Exception as exc:
+                            raise ValueError(
+                                f"{input_path}: illegal selectedMove16 "
+                                f"{selected_move16:#06x} at game {stats.games}, ply {ply}"
+                            ) from exc
+
+                stats.games += 1
+
+        if progress is not None and progress.n < file_size:
+            progress.update(file_size - progress.n)
+    finally:
+        if progress is not None:
+            progress.close()
+
+    return stats
+
+
+def convert_psv_to_repe_file(
+    input_path: Path,
+    output: BinaryIO,
+    *,
+    batch_size: int = 65536,
+    no_progress: bool = False,
+) -> ConvertStats:
+    total_records = validate_fixed_record_file(input_path, PSV_SIZE, "PSV")
+    stats = ConvertStats(files=1, positions=0)
+    board = cshogi.Board()
+    chunk_size = PSV_SIZE * batch_size
+    progress = make_progress(input_path, no_progress=no_progress)
+
+    try:
+        with input_path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                if progress is not None:
+                    progress.update(len(chunk))
+
+                psvs = np.frombuffer(chunk, dtype=PSV)
+                out_chunk = bytearray(len(psvs) * REPE_SIZE)
+                for i, psv in enumerate(psvs):
+                    board.set_psfen(psv["sfen"])
+                    if not board.is_ok():
+                        raise ValueError(
+                            f"{input_path}: invalid packed SFEN at record "
+                            f"{stats.positions + i}"
+                        )
+
+                    record = encode_position(
+                        board, int(psv["game_result"]), int(psv["score"])
+                    )
+                    out_chunk[i * REPE_SIZE:(i + 1) * REPE_SIZE] = record
+
+                output.write(out_chunk)
+                stats.positions += len(psvs)
+    finally:
+        if progress is not None:
+            progress.close()
+
+    if stats.positions != total_records:
+        raise RuntimeError(
+            f"{input_path}: converted {stats.positions} records, expected {total_records}"
+        )
+    return stats
+
+
+def convert_repe_to_psv_file(
+    input_path: Path,
+    output: BinaryIO,
+    *,
+    batch_size: int = 65536,
+    no_progress: bool = False,
+) -> ConvertStats:
+    total_records = validate_fixed_record_file(input_path, REPE_SIZE, "REPE")
+    stats = ConvertStats(files=1, positions=0)
+    chunk_size = REPE_SIZE * batch_size
+    progress = make_progress(input_path, no_progress=no_progress)
+
+    try:
+        with input_path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                if progress is not None:
+                    progress.update(len(chunk))
+
+                n = len(chunk) // REPE_SIZE
+                psvs = np.zeros(n, dtype=PSV)
+                for i in range(n):
+                    record = chunk[i * REPE_SIZE:(i + 1) * REPE_SIZE]
+                    board, game_result_stm, eval_stm = decode_position(record)
+
+                    board.to_psfen(psvs["sfen"][i])
+                    psvs["score"][i] = eval_stm
+                    # REPEは指し手・手数を持たないため0埋めする。
+                    psvs["move"][i] = 0
+                    psvs["gamePly"][i] = 0
+                    psvs["game_result"][i] = game_result_stm
+
+                psvs.tofile(output)
+                stats.positions += n
+    finally:
+        if progress is not None:
+            progress.close()
+
+    if stats.positions != total_records:
+        raise RuntimeError(
+            f"{input_path}: converted {stats.positions} records, expected {total_records}"
+        )
+    return stats
+
+
+def convert_hcpe_to_repe_file(
+    input_path: Path,
+    output: BinaryIO,
+    *,
+    batch_size: int = 65536,
+    no_progress: bool = False,
+) -> ConvertStats:
+    total_records = validate_fixed_record_file(input_path, HCPE_SIZE, "HCPE")
+    stats = ConvertStats(files=1, positions=0)
+    board = cshogi.Board()
+    chunk_size = HCPE_SIZE * batch_size
+    progress = make_progress(input_path, no_progress=no_progress)
+
+    try:
+        with input_path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                if progress is not None:
+                    progress.update(len(chunk))
+
+                hcpes = np.frombuffer(chunk, dtype=HCPE)
+                out_chunk = bytearray(len(hcpes) * REPE_SIZE)
+                for i, hcpe in enumerate(hcpes):
+                    board.set_hcp(hcpe["hcp"])
+                    if not board.is_ok():
+                        raise ValueError(
+                            f"{input_path}: invalid HCP at record {stats.positions + i}"
+                        )
+
+                    game_result_stm = game_result_for_side_to_move(
+                        int(hcpe["gameResult"]), board.turn
+                    )
+                    record = encode_position(board, game_result_stm, int(hcpe["eval"]))
+                    out_chunk[i * REPE_SIZE:(i + 1) * REPE_SIZE] = record
+
+                output.write(out_chunk)
+                stats.positions += len(hcpes)
+    finally:
+        if progress is not None:
+            progress.close()
+
+    if stats.positions != total_records:
+        raise RuntimeError(
+            f"{input_path}: converted {stats.positions} records, expected {total_records}"
+        )
+    return stats
+
+
+def convert_repe_to_hcpe_file(
+    input_path: Path,
+    output: BinaryIO,
+    *,
+    batch_size: int = 65536,
+    no_progress: bool = False,
+) -> ConvertStats:
+    total_records = validate_fixed_record_file(input_path, REPE_SIZE, "REPE")
+    stats = ConvertStats(files=1, positions=0)
+    chunk_size = REPE_SIZE * batch_size
+    progress = make_progress(input_path, no_progress=no_progress)
+
+    try:
+        with input_path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                if progress is not None:
+                    progress.update(len(chunk))
+
+                n = len(chunk) // REPE_SIZE
+                hcpes = np.zeros(n, dtype=HCPE)
+                for i in range(n):
+                    record = chunk[i * REPE_SIZE:(i + 1) * REPE_SIZE]
+                    board, game_result_stm, eval_stm = decode_position(record)
+
+                    board.to_hcp(hcpes["hcp"][i])
+                    hcpes["eval"][i] = eval_stm
+                    # REPEは指し手を持たないため0埋めする。
+                    hcpes["bestMove16"][i] = 0
+                    hcpes["gameResult"][i] = side_to_move_game_result_to_hcpe(
+                        game_result_stm, board.turn
+                    )
+
+                hcpes.tofile(output)
+                stats.positions += n
+    finally:
+        if progress is not None:
+            progress.close()
+
+    if stats.positions != total_records:
+        raise RuntimeError(
+            f"{input_path}: converted {stats.positions} records, expected {total_records}"
+        )
+    return stats
+
+
+def convert_hcpe3_to_repe_file(
+    input_path: Path,
+    output: BinaryIO,
+    *,
+    batch_size: int = 65536,
+    no_progress: bool = False,
+) -> ConvertStats:
+    del batch_size
+
+    stats = ConvertStats(files=1)
+    board = cshogi.Board()
+    file_size = input_path.stat().st_size
+    progress = make_progress(input_path, no_progress=no_progress)
+
+    def update_progress(n: int) -> None:
+        if progress is not None:
+            progress.update(n)
+
+    try:
+        with input_path.open("rb") as f:
+            while True:
+                header_bytes = f.read(HCPE3_HEADER.itemsize)
+                if not header_bytes:
+                    break
+                if len(header_bytes) != HCPE3_HEADER.itemsize:
+                    raise EOFError(
+                        f"{input_path}: truncated HCPE3 header at game {stats.games}"
+                    )
+                update_progress(len(header_bytes))
+
+                header = np.frombuffer(header_bytes, dtype=HCPE3_HEADER, count=1)[0]
+                move_num = int(header["moveNum"])
+
+                board.set_hcp(header["hcp"])
+                if not board.is_ok():
+                    raise ValueError(f"{input_path}: invalid HCP at game {stats.games}")
+
+                for ply in range(move_num):
+                    mi_bytes = read_exact(
+                        f,
+                        MOVE_INFO.itemsize,
+                        f"{input_path}: MoveInfo at game {stats.games}, ply {ply}",
+                    )
+                    update_progress(len(mi_bytes))
+                    move_info = np.frombuffer(mi_bytes, dtype=MOVE_INFO, count=1)[0]
+
+                    candidate_num = int(move_info["candidateNum"])
+                    selected_move16 = u16(move_info["selectedMove16"])
+
+                    game_result_stm = game_result_for_side_to_move(
+                        int(header["result"]), board.turn
+                    )
+                    record = encode_position(
+                        board, game_result_stm, int(move_info["eval"])
+                    )
+                    output.write(record)
                     stats.positions += 1
 
                     if candidate_num:

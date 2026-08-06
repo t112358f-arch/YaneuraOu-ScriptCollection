@@ -286,7 +286,17 @@ mixed_teacher/mixed-00001.hcpe3	8589930000	120000	40000	2863310000	teacher1/a.hc
 
 ## 教師データのフォーマット変換
 
-`pack` / `psv` / `hcpe` / `hcpe3` はすべて教師データとして使えますが、形式の性質が違うため、すべての方向に可逆変換できるわけではありません。
+`pack` / `psv` / `hcpe` / `hcpe3` / `repe` はすべて教師データとして使えますが、形式の性質が違うため、すべての方向に可逆変換できるわけではありません。
+
+### REPE形式について
+
+`repe` (Rank Encoding Position Eval, 拡張子 `.repe`) は局面1つを256bit(32Byte)の固定長で保存する独自フォーマットです。`pack` / `hcpe` / `hcpe3` / `psv` と違い `cshogi` にフォーマット定義を持たないため、専用の変換ロジックを `CommonLib/RepeFormatLib.py` にまとめています。
+
+REPEは局面・勝敗・評価値の3つしか保持しません。そのため:
+
+- `hcpe` / `psv` から `repe` へ変換する場合、指し手や手数など REPEに持たせられない情報は変換時に捨てられます。
+- `repe` から他形式へ変換する場合、指し手 (`bestMove16` / `move`) や手数 (`gamePly`) はREPEに情報がないため **0埋め** して出力します。
+- REPEは局面を必ず手番側視点へ正規化して保存する仕様のため、`repe` から復元した局面は常に「手番側が先手であるかのように正規化された局面」になります。元の局面が本来先手番・後手番のどちらだったかという情報自体を保持しないため、`repe` を経由すると元の手番の情報は失われます(これはREPE自体の仕様であり、変換のバグではありません)。
 
 直接変換できるもの:
 
@@ -297,6 +307,11 @@ mixed_teacher/mixed-00001.hcpe3	8589930000	120000	40000	2863310000	teacher1/a.hc
 | `psv` -> `hcpe` | `teacher/convert_teacher.py` | PSVをHCPEへ変換する。PSVの `gamePly` はHCPEには入らない。複数ファイルやフォルダ入力にも対応。 |
 | `hcpe3` -> `hcpe` | `teacher/convert_teacher.py` | HCPE3の各ゲームを局面列に展開してHCPEへ変換する。複数ファイルやフォルダ入力にも対応。 |
 | `hcpe3` -> `psv` | `teacher/convert_teacher.py` | HCPE3を局面列に展開してPSVへ変換する。複数ファイルやフォルダ入力にも対応。 |
+| `hcpe` -> `repe` | `teacher/convert_teacher.py` | HCPEの局面・評価値・勝敗をREPEへ変換する。指し手は捨てられる。 |
+| `repe` -> `hcpe` | `teacher/convert_teacher.py` | REPEをHCPEへ変換する。指し手 (`bestMove16`) は0埋め。 |
+| `psv` -> `repe` | `teacher/convert_teacher.py` | PSVの局面・評価値・勝敗をREPEへ変換する。指し手・手数は捨てられる。 |
+| `repe` -> `psv` | `teacher/convert_teacher.py` | REPEをPSVへ変換する。指し手・`gamePly` は0埋め。 |
+| `hcpe3` -> `repe` | `teacher/convert_teacher.py` | HCPE3を局面列に展開してREPEへ変換する。指し手・policy情報は捨てられる。 |
 
 `pack` から `hcpe`:
 
@@ -337,6 +352,36 @@ python teacher/convert_teacher.py --input input.hcpe3 --output output.hcpe
 python teacher/convert_teacher.py --input input.hcpe3 --output output.psv
 ```
 
+`hcpe` から `repe`:
+
+```bash
+python teacher/convert_teacher.py --input input.hcpe --output output.repe
+```
+
+`repe` から `hcpe`:
+
+```bash
+python teacher/convert_teacher.py --input input.repe --output output.hcpe
+```
+
+`psv` から `repe`:
+
+```bash
+python teacher/convert_teacher.py --input input.psv --output output.repe
+```
+
+`repe` から `psv`:
+
+```bash
+python teacher/convert_teacher.py --input input.repe --output output.psv
+```
+
+`hcpe3` から `repe`:
+
+```bash
+python teacher/convert_teacher.py --input input.hcpe3 --output output.repe
+```
+
 `convert_teacher.py` は入力形式を `--input` から推定します。入力がファイルなら拡張子で判定し、入力がフォルダなら、そのフォルダ内の教師ファイルの拡張子から判定します。出力が拡張子つきファイルなら、出力形式はその拡張子から判定します。出力がフォルダなら、将来変換先が増えたときに意味が変わらないように `--to` の指定を必須にしています。
 
 フォルダ内の各ファイルを個別に変換:
@@ -347,6 +392,11 @@ python teacher/convert_teacher.py --input psv_dir --output hcpe_dir --to hcpe
 python teacher/convert_teacher.py --input pack_dir --output hcpe_dir --to hcpe
 python teacher/convert_teacher.py --input hcpe3_dir --output hcpe_dir --to hcpe
 python teacher/convert_teacher.py --input hcpe3_dir --output psv_dir --to psv
+python teacher/convert_teacher.py --input hcpe_dir --output repe_dir --to repe
+python teacher/convert_teacher.py --input repe_dir --output hcpe_dir --to hcpe
+python teacher/convert_teacher.py --input psv_dir --output repe_dir --to repe
+python teacher/convert_teacher.py --input repe_dir --output psv_dir --to psv
+python teacher/convert_teacher.py --input hcpe3_dir --output repe_dir --to repe
 ```
 
 フォルダ内の各ファイルを1つの出力ファイルへ結合:
@@ -357,6 +407,11 @@ python teacher/convert_teacher.py --input psv_dir --output merged.hcpe
 python teacher/convert_teacher.py --input pack_dir --output merged.hcpe
 python teacher/convert_teacher.py --input hcpe3_dir --output merged.hcpe
 python teacher/convert_teacher.py --input hcpe3_dir --output merged.psv
+python teacher/convert_teacher.py --input hcpe_dir --output merged.repe
+python teacher/convert_teacher.py --input repe_dir --output merged.hcpe
+python teacher/convert_teacher.py --input psv_dir --output merged.repe
+python teacher/convert_teacher.py --input repe_dir --output merged.psv
+python teacher/convert_teacher.py --input hcpe3_dir --output merged.repe
 ```
 
 サブフォルダも含めて変換したい場合は `--recursive` を指定します。固定長形式同士の変換では、`--batch-size` で一度に処理するレコード数を変更できます。
@@ -376,6 +431,8 @@ python teacher/convert_teacher.py --input tmp.hcpe --output output.psv
 | `pack` -> `hcpe3` | 既存packをそのままHCPE3へ変換するスクリプトはない。必要なら `pack -> hcpe -> hcpe3` とするが、後段はONNX再評価を伴う。 |
 | `psv` -> `hcpe3` | 直接変換スクリプトはない。必要なら `psv -> hcpe -> hcpe3` とするが、後段はONNX再評価を伴う。 |
 | `hcpe` / `psv` / `hcpe3` -> `pack` | 逆変換スクリプトはない。`pack` は棋譜形式なので、局面列から元の対局単位データを復元できない。 |
+| `pack` -> `repe` | 直接変換スクリプトはない。`pack -> hcpe -> repe` の2段階で変換する。 |
+| `repe` -> `pack` / `hcpe3` | 逆変換スクリプトはない。REPEは局面・勝敗・評価値しか持たないため、`pack` の棋譜復元や `hcpe3` のpolicy情報復元はできない。 |
 
 ## re-eval
 

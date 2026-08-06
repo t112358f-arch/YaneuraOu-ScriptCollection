@@ -19,9 +19,14 @@ sys.path.insert(0, str(COMMON_LIB_DIR))
 from TeacherConvertLib import (  # noqa: E402
     convert_hcpe3_to_hcpe_file,
     convert_hcpe3_to_psv_file,
+    convert_hcpe3_to_repe_file,
     convert_hcpe_to_psv_file,
+    convert_hcpe_to_repe_file,
     convert_pack_to_hcpe_file,
     convert_psv_to_hcpe_file,
+    convert_psv_to_repe_file,
+    convert_repe_to_hcpe_file,
+    convert_repe_to_psv_file,
 )
 from TeacherFormatLib import (  # noqa: E402
     ConvertStats,
@@ -37,6 +42,11 @@ CONVERTERS = {
     ("psv", "hcpe"): convert_psv_to_hcpe_file,
     ("hcpe3", "hcpe"): convert_hcpe3_to_hcpe_file,
     ("hcpe3", "psv"): convert_hcpe3_to_psv_file,
+    ("hcpe3", "repe"): convert_hcpe3_to_repe_file,
+    ("hcpe", "repe"): convert_hcpe_to_repe_file,
+    ("repe", "hcpe"): convert_repe_to_hcpe_file,
+    ("psv", "repe"): convert_psv_to_repe_file,
+    ("repe", "psv"): convert_repe_to_psv_file,
 }
 
 INPUT_FORMATS = sorted({src for src, _ in CONVERTERS})
