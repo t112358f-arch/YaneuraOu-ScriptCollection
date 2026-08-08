@@ -136,6 +136,17 @@ decoded_board, game_result_stm, eval_stm = decode_position(data)
 
 ビット配置の詳細(79マスの走査順序、side bit列の順序、駒種類列の並び順、成り情報のブロック順など)は `RepeFormatLib.py` 冒頭のdocstringにまとめてあります。
 
+### 高速化 (C++/Cython)
+
+`encode_position` / `decode_position` の内部で行う組合せ順位計算は、大量データの変換では純Pythonのループがボトルネックになります。cshogi 本体と同じ「C++コア + Cythonバインディング」構成の高速版を `repe_native/` に用意しており、ビルド済みならそちらへ自動的に処理を委譲します(未ビルドでも純Python実装へ自動フォールバックするため、ビルドは必須ではありません)。
+
+```bash
+cd CommonLib/repe_native
+python setup.py build_ext --inplace
+```
+
+詳細・ベンチマークは `repe_native/README.md` を参照してください。`RepeFormatLib.NATIVE_AVAILABLE` で有効/無効を確認できます。
+
 ## YaneShogiLib.py
 
 将棋スクリプト全般で使う補助ライブラリです。

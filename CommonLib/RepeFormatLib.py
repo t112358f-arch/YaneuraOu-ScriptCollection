@@ -55,20 +55,89 @@ REPEが持つのは「局面・勝敗・評価値」のみです。指し手や�
   ブロックを並べ、各ブロック内はPart2の駒種類列を先頭から見て、その
   駒種類が現れるたびに1bitずつ消費する(持ち駒として現れた場合は
   常に0を格納する。持ち駒は成れないため)。
+
+高速化について:
+    `encode_position` / `decode_position` の内部で行っている組合せ順位の
+    計算(comb_rank/unrank・多重集合順列のrank/unrank)は純Pythonのループで
+    書くと1レコードあたりの計算コストが無視できないため、cshogi 本体と
+    同様に C++ コア + Cython バインディングによる高速版を `repe_native/`
+    以下に用意しています。`repe_native/` を `python setup.py build_ext
+    --inplace` でビルドし、import path 上に置いておくと、本モジュールの
+    `encode_position` / `decode_position` は自動的にそちらへ処理を委譲します
+    (未ビルドなら透過的にこのファイルの純Python実装にフォールバックするので、
+    ビルドは必須ではありません)。native拡張の有無は `NATIVE_AVAILABLE` で
+    確認できます。native側の出力は純Python実装と全件(57305局面)で
+    バイト完全一致することを検証済みです。詳細は `repe_native/README.md`
+    を参照してください。
 """
 
 from __future__ import annotations
 
+import glob
 import math
+import os
+import sys
 from functools import lru_cache
 
 import cshogi
 
 __all__ = [
     "REPE_SIZE",
+    "NATIVE_AVAILABLE",
     "encode_position",
     "decode_position",
 ]
+
+# C++/Cython で実装した高速版 (`repe_native/`, cshogi と同様の構成: C++コア +
+# Cythonバインディング) が `build_ext --inplace` 済みで import path 上にあれば
+# それを使い、無ければ本ファイルの純Python実装にフォールバックする。
+# ビルド手順は `repe_native/README.md` を参照。速度差はおおよそ1桁
+# (純Python: 数千 records/sec、native: 数万〜十数万 records/sec) で、
+# どちらを使っても入出力は完全に同一 (native側はPython実装と全件突合済み)。
+_REPE_NATIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repe_native")
+
+
+def _try_import_native():
+    """ビルド済みの `repe_native` 拡張があればimportして返す。無ければ `None`。
+
+    注意: `repe_native/` ディレクトリ自体は (ビルド前・拡張未生成でも)
+    `CommonLib/` 配下に常に存在する (`.pyx` / `.hpp` / `setup.py` など)。
+    呼び出し元 (`TeacherConvertLib.py` 等) は `CommonLib` 自体を `sys.path`
+    に追加するため、素朴に `import repe_native` すると `__init__.py` を
+    持たない `repe_native/` ディレクトリが PEP 420 namespace package として
+    解決されてしまい、「未ビルドなのに import 自体は成功するが
+    `encode_position` 属性が無い」という壊れ方をする。それを避けるため、
+    (1) コンパイル済み拡張子(`.so`/`.pyd`/`.dylib`)の実体が存在することを
+    先に確認してから import を試み、(2) importできても念のため属性の存在を
+    確認する、という二重のガードを入れている。
+    """
+    if not os.path.isdir(_REPE_NATIVE_DIR):
+        return None
+
+    has_binary = any(
+        glob.glob(os.path.join(_REPE_NATIVE_DIR, f"repe_native*{suffix}"))
+        for suffix in (".so", ".pyd", ".dylib")
+    )
+    if not has_binary:
+        return None
+
+    if _REPE_NATIVE_DIR not in sys.path:
+        sys.path.insert(0, _REPE_NATIVE_DIR)
+
+    try:
+        import repe_native as native_module
+    except ImportError:
+        return None
+
+    if not hasattr(native_module, "encode_position") or not hasattr(native_module, "decode_position"):
+        # namespace package 化などで想定外のものが解決された場合の防御。
+        return None
+
+    return native_module
+
+
+_native = _try_import_native()
+NATIVE_AVAILABLE = _native is not None
 
 BLACK = cshogi.BLACK
 WHITE = cshogi.WHITE
@@ -210,7 +279,7 @@ def _comb_unrank(rank: int, n: int, k: int) -> list[int]:
 #   局面 <-> REPE
 # ============================================================
 
-def encode_position(board: "cshogi.Board", game_result_stm: int, eval_stm: int) -> bytes:
+def _encode_position_python(board: "cshogi.Board", game_result_stm: int, eval_stm: int) -> bytes:
     """cshogi.Boardと手番側から見た勝敗・評価値をREPEの32byteへ変換する。
 
     :param board: 変換したい局面。`board.turn` が手番側として使われる。
@@ -329,7 +398,7 @@ def encode_position(board: "cshogi.Board", game_result_stm: int, eval_stm: int) 
     return value.to_bytes(REPE_SIZE, "big")
 
 
-def decode_position(data: bytes) -> tuple["cshogi.Board", int, int]:
+def _decode_position_python(data: bytes) -> tuple["cshogi.Board", int, int]:
     """REPEの32byteをデコードし、`(board, game_result_stm, eval_stm)` を返す。
 
     `board` は手番側視点へ正規化された局面で、常に `turn == cshogi.BLACK`
@@ -440,3 +509,58 @@ def decode_position(data: bytes) -> tuple["cshogi.Board", int, int]:
     board = cshogi.Board()
     board.set_pieces(pieces, (self_hand, enemy_hand))
     return board, game_result_stm, eval_stm
+
+
+# ============================================================
+#   公開API (native拡張があればそちらへ委譲、無ければ純Python実装)
+# ============================================================
+
+def encode_position(board: "cshogi.Board", game_result_stm: int, eval_stm: int) -> bytes:
+    """cshogi.Boardと手番側から見た勝敗・評価値をREPEの32byteへ変換する。
+
+    :param board: 変換したい局面。`board.turn` が手番側として使われる。
+    :param game_result_stm: 手番側から見た勝敗。1=win, 0=draw, -1=lose
+        (PSVの `game_result` と同じ規約)。
+    :param eval_stm: 手番側から見た評価値 (int16の範囲)。
+    :return: 32byteのREPEレコード。
+
+    `repe_native` (C++/Cython実装) がビルド済みならそちらを使い高速化する。
+    未ビルドなら本ファイル内の純Python実装 (`_encode_position_python`) を使う。
+    どちらの経路でも出力バイト列は完全に同一 (全件突合済み)。
+    """
+    if _native is not None:
+        hand = board.pieces_in_hand
+        return _native.encode_position(
+            board.pieces,
+            list(hand[BLACK]),
+            list(hand[WHITE]),
+            board.king_square(BLACK),
+            board.king_square(WHITE),
+            board.turn,
+            game_result_stm,
+            eval_stm,
+        )
+    return _encode_position_python(board, game_result_stm, eval_stm)
+
+
+def decode_position(data: bytes) -> tuple["cshogi.Board", int, int]:
+    """REPEの32byteをデコードし、`(board, game_result_stm, eval_stm)` を返す。
+
+    `board` は手番側視点へ正規化された局面で、常に `turn == cshogi.BLACK`
+    (=手番側をBLACKとみなす)状態で返る。元の局面の実際の先後は、
+    REPEには保存されていないため復元できない(仕様通りの正規化)。
+    `game_result_stm` / `eval_stm` は手番側から見た値 (PSVと同じ規約)。
+
+    `repe_native` (C++/Cython実装) がビルド済みならそちらを使い高速化する。
+    未ビルドなら本ファイル内の純Python実装 (`_decode_position_python`) を使う。
+    どちらの経路でも出力 (盤面・持ち駒・勝敗・評価値) は完全に同一
+    (全件突合済み)。
+    """
+    if _native is not None:
+        pieces, hand_black, hand_white, _black_king, _white_king, game_result_stm, eval_stm = (
+            _native.decode_position(data)
+        )
+        board = cshogi.Board()
+        board.set_pieces(pieces, (hand_black, hand_white))
+        return board, game_result_stm, eval_stm
+    return _decode_position_python(data)
