@@ -60,17 +60,32 @@ print(RepeFormatLib.NATIVE_AVAILABLE)  # True ならnative版を使用中
 ## ベンチマーク (参考値)
 
 `test.psv` (57,305局面, このリポジトリの検証に使用したものと同一形式) を
-このマシン上でエンコード/デコードした際のスループット:
+このマシン上でエンコード/デコードした際のスループット (同一セッション内で
+直接比較したもの。絶対値は環境・CPUに強く依存するため、あくまで相対的な
+目安):
 
-| | 純Python | native (C++/Cython) |
-|---|---|---|
-| encode | 約14,500 records/sec | 約53,700 records/sec (約3.7倍) |
-| decode | 約10,000 records/sec | 約24,700 records/sec (約2.5倍) |
+| | 純Python | native (最適化前) | native (現在: LUT + incremental multinomial) |
+|---|---|---|---|
+| encode | 約7,700 rec/s | 約30,000 rec/s | **約81,300 rec/s** |
+| decode | 約6,000 rec/s | 約12,400 rec/s | **約186,200 rec/s** |
 
-decode側の伸びが相対的に小さいのは、`cshogi.Board.set_pieces()` の呼び出しや
-Cython→Pythonリストへの変換など、native化していないcshogi/Python側の処理が
-相対的に支配的になるためです (組合せ数学の計算自体はどちらも同程度、あるいは
-それ以上高速化されています)。実際の倍率は環境やCPUに依存します。
+native側は Rust版 (`tatara` の `crates/shogi-format/src/repe.rs`) と同じ
+2段階の最適化を行っている:
+
+1. **lookup table化**: 組合せ順位 (`C(v,i)`, `v=0..=79`) と、盤上駒数
+   `s` ごとの累積offsetは record に依らない定数なので、初回呼び出し時に
+   一度だけ (`repe::tables::part1_tables()` / `part2_tables()`、C++11の
+   関数内staticでスレッドセーフに1回だけ構築) 事前計算しテーブル参照に
+   置き換えている。
+2. **incremental multinomial**: Part2 (駒種類列) の4要素目以降のフォールバック
+   処理は、直前の状態の multinomial 値から `multinomial(remaining-1,
+   counts[s]-=1) == m * counts[s] / remaining` という組合せ論の恒等式
+   (割り切れる) で乗除算1回に置き換えており、`multinomial()` の再計算を
+   避けている。decode側の伸びが特に大きいのはこの効果が大きい。
+
+decode側の伸びがencodeより大きいのは、encode側はまだ盤面スキャン
+(`cshogi.Board.pieces` の走査) など native化していない周辺処理の比率が
+相対的に高いためです。
 
 ## 正しさの検証
 
